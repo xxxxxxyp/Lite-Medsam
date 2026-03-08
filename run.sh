@@ -1,0 +1,3 @@
+nohup python train_one_gpu.py -data_root dataset/npy/imagesTr422/ -work_dir work_dir625/lymphoma_train_medsam -num_epochs 100 -device "cuda:4" -train_pathfile "dataset/preprocessed/train422/MedSAM_test/PET_Abd/" -test_pathfile "dataset/preprocessed/img30/MedSAM_test/PET_Abd" -pretrained_checkpoint lite_medsam.pth -test_data_root "dataset/npy/img30"> lymphoma_medsam.log 2>&1 &
+
+nohup python train_one_gpu.py -data_root dataset/npy/imagesTr422/ -work_dir work_dir625/lymphoma_train_fromscratch -num_epochs 100 -device "cuda:5" -train_pathfile "dataset/preprocessed/train422/MedSAM_test/PET_Abd/" -test_pathfile "dataset/preprocessed/img30/MedSAM_test/PET_Abd" -test_data_root "dataset/npy/img30"> lymphoma_fromscratch.log 2>&1 &
