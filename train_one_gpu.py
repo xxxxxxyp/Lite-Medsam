@@ -28,6 +28,7 @@ from evaluation.SurfaceDice import compute_surface_distances, compute_surface_di
 from scipy.ndimage import rotate, map_coordinates, gaussian_filter
 # from evaluation.compute_metrics import compute_multi_class_nsd
 
+from dataset import CascadeMedSAMDataset
 from lightweight_detector import load_detector_model, generate_lesion_bbox
 
 
@@ -58,7 +59,7 @@ def compute_multi_class_nsd(gt, seg, spacing, tolerance=2.0):
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "-data_root", type=str, default="/data/xyp/下载/data/npy/FL/train_0",
-    help="Path to the npy data root."
+    help="Path to the npy data root. When --json_prompt_path is provided, this path is treated as the training npz directory."
 )
 parser.add_argument(
     # "-pretrained_checkpoint", type=str, default="lite_medsam.pth",
@@ -129,6 +130,10 @@ parser.add_argument(
     "-test_data_root", type=str, default="/data/xyp/下载/data/npy/FL/val_0",
     help="file path of train every 10 epochs."
 )
+parser.add_argument(
+    "--json_prompt_path", type=str, default=None,
+    help="Path to prompt JSON for cascade training; when provided, training switches to CascadeMedSAMDataset and -data_root is treated as the npz directory."
+)
 
 args = parser.parse_args()
 
@@ -155,6 +160,7 @@ if __name__ == "__main__":
     best_val_loss = 1e10
     patience=10
     test_data_root=args.test_data_root
+    json_prompt_path = args.json_prompt_path
 
     makedirs(work_dir, exist_ok=True)
 
@@ -519,7 +525,7 @@ if __name__ == "__main__":
 
             sparse_embeddings, dense_embeddings = self.prompt_encoder(
                 points=None,
-                boxes=box_np,
+                boxes=box_torch,
                 masks=None,
             )
             low_res_masks, iou_predictions = self.mask_decoder(
@@ -722,7 +728,15 @@ if __name__ == "__main__":
 
     #%% sanity test of dataset class
     if do_sancheck:
-        tr_dataset = NpyDataset(data_root, data_aug=False)
+        if json_prompt_path:
+            tr_dataset = CascadeMedSAMDataset(
+                npz_dir=data_root,
+                json_prompt_path=json_prompt_path,
+                image_size=256,
+                bbox_shift=bbox_shift,
+            )
+        else:
+            tr_dataset = NpyDataset(data_root, data_aug=False)
         tr_dataloader = DataLoader(tr_dataset, batch_size=8, shuffle=True)
         for step, batch in enumerate(tr_dataloader):
             # show the example
@@ -958,7 +972,15 @@ if __name__ == "__main__":
     iou_loss = nn.MSELoss(reduction='mean')
     focal_loss=monai.losses.FocalLoss(gamma=5,alpha=0.75)
     # %%
-    train_dataset = NpyDataset(data_root=data_root, data_aug=True)
+    if json_prompt_path:
+        train_dataset = CascadeMedSAMDataset(
+            npz_dir=data_root,
+            json_prompt_path=json_prompt_path,
+            image_size=256,
+            bbox_shift=bbox_shift,
+        )
+    else:
+        train_dataset = NpyDataset(data_root=data_root, data_aug=True)
     #train_dataset = NpyDataset(data_root=data_root, data_aug=False)
     train_loader = DataLoader(train_dataset, 
                               batch_size=batch_size, 
