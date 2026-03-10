@@ -191,9 +191,6 @@ class CascadeMedSAMDataset(Dataset):
         if selected_strategy == "A":
             chosen_box = random.choice(fp_boxes)
             target_mask_2d = np.zeros_like(gt_2d, dtype=np.uint8)
-            # A 策略的核心要求：监督 mask 必须是全 0，不能混入任何真实前景像素。
-            if np.any(target_mask_2d):
-                raise RuntimeError("FP branch target mask must remain all zeros.")
             box_256 = self._scale_box_to_256(chosen_box, gt_2d.shape)
         elif selected_strategy == "B":
             chosen_box = random.choice(tp_boxes)

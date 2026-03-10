@@ -132,7 +132,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--json_prompt_path", type=str, default=None,
-    help="级联训练使用的 prompt json 路径；传入后训练集会切换为 CascadeMedSAMDataset，并将 -data_root 视为 npz 目录。"
+    help="Path to prompt JSON for cascade training; when provided, training switches to CascadeMedSAMDataset and -data_root is treated as the npz directory."
 )
 
 args = parser.parse_args()
