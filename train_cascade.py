@@ -451,34 +451,21 @@ if __name__ == "__main__":
 
         return medsam_seg
 
-    def get_bbox(img_padded, gt2D, img_name, bbox_path, bbox_shift=10):
+    def get_bbox_from_gt2D(gt2D, bbox_shift=10):
         """
-        从预处理保存的文件中读取bbox
-        img_name: 图像文件名（用于匹配bbox文件）
-        bbox_path: bbox保存的根路径
+        直接从验证集的二维金标准中提取bbox（Oracle Validation），彻底摆脱外部 npy 框文件
         """
-        # 1. 读取预处理生成的bbox (确保这里是 SUV 生成的框)
-        bbox_file = join(bbox_path, img_name)
-        if exists(bbox_file):
-            bbox = np.load(bbox_file)
-        else:
-            # fallback：如果没有bbox文件，用全图框
-            bbox = np.array([0, 0, 255, 255], dtype=np.int32)
-            # print(f"No bbox for {img_name}\n") # 可以注释掉减少刷屏
+        y_indices, x_indices = np.where(gt2D > 0)
+        if len(x_indices) == 0 or len(y_indices) == 0:
+            return np.array([0, 0, 255, 255], dtype=np.float32)
 
-        # 2. 增强扰动逻辑 (针对 Issue 2 的修复)
-        # 即使读入的是 SUV 框，我们也可以进一步增加扰动，增强模型鲁棒性
-        # 如果是训练阶段(这里可以通过外部参数控制，或者简单地总是应用)，建议 shift 设为 10-20
-        if bbox_shift > 0: 
-            x_min, y_min, x_max, y_max = bbox
-            x_min = max(0, x_min - random.randint(0, bbox_shift))
-            x_max = min(255, x_max + random.randint(0, bbox_shift))
-            y_min = max(0, y_min - random.randint(0, bbox_shift))
-            y_max = min(255, y_max + random.randint(0, bbox_shift))
-            bbox = np.array([x_min, y_min, x_max, y_max], dtype=np.int32)
-
-        return bbox
-
+        height, width = gt2D.shape
+        x_min = max(0, int(np.min(x_indices)) - random.randint(0, bbox_shift))
+        x_max = min(width - 1, int(np.max(x_indices)) + random.randint(0, bbox_shift))
+        y_min = max(0, int(np.min(y_indices)) - random.randint(0, bbox_shift))
+        y_max = min(height - 1, int(np.max(y_indices)) + random.randint(0, bbox_shift))
+        
+        return np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
 
 
@@ -530,11 +517,8 @@ if __name__ == "__main__":
                             gt2D_resize = gt2D.astype(np.uint8)
                         gt2D_padded = pad_image(gt2D_resize, 256) ## (256, 256)
                         if np.sum(gt2D_padded) > 0:
-                            box = get_bbox(
-                                img_padded=img_256_padded,
+                            box = get_bbox_from_gt2D(
                                 gt2D=gt2D_padded,
-                                img_name=img_name,  # 新增：当前切片的文件名
-                                bbox_path=bbox_root,  # 新增：bbox保存根路径
                                 bbox_shift=bbox_shift  # 原有参数
                             )
                             sam_mask = medsam_inference(medsam_lite_model, image_embedding, box, (newh, neww), (H, W))
