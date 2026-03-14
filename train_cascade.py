@@ -134,6 +134,10 @@ parser.add_argument(
     "-json_prompt_path", type=str, required=True,
     help="Path to the JSON file containing TP/FP prompts."
 )
+parser.add_argument(
+    "-val_json_prompt_path", type=str, default=None,
+    help="Path to the JSON file containing TP/FP prompts for the Validation set."
+)
 
 args = parser.parse_args()
 
@@ -161,6 +165,7 @@ if __name__ == "__main__":
     patience=10
     test_data_root=args.test_data_root
     json_prompt_path = args.json_prompt_path
+    val_json_prompt_path = args.val_json_prompt_path
 
     makedirs(work_dir, exist_ok=True)
 
@@ -537,6 +542,86 @@ if __name__ == "__main__":
                 # )
         return all_dices/item, all_nsds/item
 
+    def MedSAM_pipeline_infer_npz(npz_dir, json_prompt_path, medsam_model, device):
+        import json
+
+        all_dices = 0.0
+        all_nsds = 0.0
+        item = 0
+
+        with open(json_prompt_path, "r", encoding="utf-8") as f:
+            prompts_dict = json.load(f)
+
+        for filename in os.listdir(npz_dir):
+            if not filename.endswith(".npz"):
+                continue
+
+            npz_path = os.path.join(npz_dir, filename)
+            case_id = os.path.splitext(filename)[0]
+            with np.load(npz_path, "r", allow_pickle=True) as npz_data:
+                img_3D = npz_data["imgs"]
+                gt_3D = npz_data["gts"]
+                if "spacing" in npz_data:
+                    spacing = npz_data["spacing"]
+                else:
+                    spacing = np.array([4.0, 4.0, 4.0], dtype=np.float32)
+
+            seg_3D = np.zeros_like(gt_3D, dtype=np.uint8)
+
+            if case_id in prompts_dict:
+                case_prompts = prompts_dict[case_id]
+                z_boxes = {}
+                for ptype in ["TP", "FP"]:
+                    for prompt in case_prompts.get(ptype, []):
+                        z = int(prompt["z"])
+                        z_boxes.setdefault(z, []).append(prompt["box_2d"])
+
+                for z, boxes in z_boxes.items():
+                    if z < 0 or z >= img_3D.shape[0]:
+                        continue
+
+                    img_2d = img_3D[z]
+                    H, W = img_2d.shape[:2]
+                    img_3c = np.repeat(img_2d[:, :, None], 3, axis=-1)
+
+                    img_256 = resize_longest_side(img_3c, 256)
+                    newh, neww = img_256.shape[:2]
+                    img_256 = (img_256 - img_256.min()) / np.clip(
+                        img_256.max() - img_256.min(), a_min=1e-8, a_max=None
+                    )
+                    img_256_padded = pad_image(img_256, 256)
+                    img_tensor = torch.tensor(img_256_padded).float().permute(2, 0, 1).unsqueeze(0).to(device)
+
+                    with torch.no_grad():
+                        image_embedding = medsam_model.image_encoder(img_tensor)
+
+                    slice_seg = np.zeros((H, W), dtype=np.uint8)
+                    scale = 256.0 / max(H, W)
+                    for box in boxes:
+                        y_min, x_min, y_max, x_max = box
+                        box_256 = np.array(
+                            [x_min * scale, y_min * scale, x_max * scale, y_max * scale],
+                            dtype=np.float32,
+                        )
+                        sam_mask = medsam_inference(medsam_model, image_embedding, box_256, (newh, neww), (H, W))
+                        slice_seg[sam_mask > 0] = 1
+
+                    seg_3D[z] = slice_seg
+
+            gt_binary = (gt_3D > 0).astype(np.uint8)
+            seg_binary = (seg_3D > 0).astype(np.uint8)
+            dsc = compute_dice_coefficient(gt_binary, seg_binary)
+            surface_distance = compute_surface_distances(gt_binary, seg_binary, spacing_mm=spacing)
+            nsd = compute_surface_dice_at_tolerance(surface_distance, 4.0)
+
+            all_dices += dsc
+            all_nsds += nsd
+            item += 1
+
+        if item == 0:
+            return 0.0, 0.0
+        return all_dices / item, all_nsds / item
+
 
 
 
@@ -822,12 +907,19 @@ if __name__ == "__main__":
     medsam_lite_model.eval()
     train_bbox_root = join(args.data_root, "bboxes")
     dice_score1,nsd1=MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
-    print(f"Epoch {0}: Train Dice Score = {dice_score1:.4f}, Train_NSD = {nsd1:.4f}")
-    wandb.log({"Train Dice Score": dice_score1,"Train_NSD": nsd1,"Epoch":0})  # 记录到 wandb
+    print(f"Epoch {0}: Oracle Train Dice = {dice_score1:.4f}, Oracle Train NSD = {nsd1:.4f}")
+    wandb.log({"Oracle Train Dice": dice_score1,"Oracle Train NSD": nsd1,"Epoch":0})  # 记录到 wandb
     val_bbox_root = join(args.test_data_root, "bboxes")  # test_data_root是验证集npy根路径
     dice_score,nsd2=MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
-    print(f"Epoch {0}: Validation Dice Score = {dice_score:.4f},Val_NSD = {nsd2:.4f}")
-    wandb.log({"Validation Dice Score": dice_score,"Val_NSD": nsd2, "Epoch":0})  # 记录到 wandb
+    print(f"Epoch {0}: Oracle Val Dice = {dice_score:.4f}, Oracle Val NSD = {nsd2:.4f}")
+    wandb.log({"Oracle Val Dice": dice_score,"Oracle Val NSD": nsd2, "Epoch":0})  # 记录到 wandb
+    if val_json_prompt_path is not None and os.path.isfile(val_json_prompt_path):
+        pipeline_dice, pipeline_nsd = MedSAM_pipeline_infer_npz(
+            test_pathfile, val_json_prompt_path, medsam_lite_model, device
+        )
+        print(f"Epoch {0}: Pipeline Val Dice = {pipeline_dice:.4f}, Pipeline Val NSD = {pipeline_nsd:.4f}")
+        wandb.log({"Pipeline Val Dice": pipeline_dice, "Pipeline Val NSD": pipeline_nsd, "Epoch": 0})
+        dice_score = pipeline_dice
     medsam_lite_model.train()
     iou=[]
     ce=[]
@@ -923,11 +1015,22 @@ if __name__ == "__main__":
             with torch.no_grad():
                 if train_pathfile!=None:
                     dice_score1,nsd1=MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
-                    print(f"Epoch {epoch + 1}: Train Dice Score = {dice_score1:.4f}, Train_NSD= {nsd1:.4f}")
-                    wandb.log({"Train Dice Score": dice_score1,"Train_NSD": nsd1, "Epoch":epoch})  # 记录到 wandb
+                    print(f"Epoch {epoch + 1}: Oracle Train Dice = {dice_score1:.4f}, Oracle Train NSD = {nsd1:.4f}")
+                    wandb.log({"Oracle Train Dice": dice_score1,"Oracle Train NSD": nsd1, "Epoch":epoch})  # 记录到 wandb
                 dice_score2, nsd2=MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
-                print(f"Epoch {epoch + 1}: Validation Dice Score = {dice_score2:.4f}, Val_NSD= {nsd2:.4f}")
-                wandb.log({"Validation Dice Score": dice_score2,"Val_NSD": nsd2, "Epoch":epoch})  # 记录到 wandb
+                print(f"Epoch {epoch + 1}: Oracle Val Dice = {dice_score2:.4f}, Oracle Val NSD = {nsd2:.4f}")
+                wandb.log({"Oracle Val Dice": dice_score2,"Oracle Val NSD": nsd2, "Epoch":epoch})  # 记录到 wandb
+                val_dice_for_best = dice_score2
+                if val_json_prompt_path is not None and os.path.isfile(val_json_prompt_path):
+                    pipeline_dice, pipeline_nsd = MedSAM_pipeline_infer_npz(
+                        test_pathfile, val_json_prompt_path, medsam_lite_model, device
+                    )
+                    print(
+                        f"Epoch {epoch + 1}: Pipeline Val Dice = {pipeline_dice:.4f}, "
+                        f"Pipeline Val NSD = {pipeline_nsd:.4f}"
+                    )
+                    wandb.log({"Pipeline Val Dice": pipeline_dice, "Pipeline Val NSD": pipeline_nsd, "Epoch": epoch})
+                    val_dice_for_best = pipeline_dice
                 pbar = tqdm(val_loader)
                 for step, batch in enumerate(pbar):
                     image = batch["image"]
@@ -975,8 +1078,8 @@ if __name__ == "__main__":
             torch.save(checkpoint, join(work_dir, "medsam_lite_best_val.pth"))
         else:
             epochs_without_improvement += 1
-        if dice_score2>dice_score:
-            dice_score=dice_score2
+        if val_dice_for_best > dice_score:
+            dice_score = val_dice_for_best
             torch.save(checkpoint, join(work_dir, "medsam_lite_best_dice.pth"))
             
         wandb.log({
