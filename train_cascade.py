@@ -545,12 +545,16 @@ if __name__ == "__main__":
     def MedSAM_pipeline_infer_npz(npz_dir, json_prompt_path, medsam_model, device):
         import json
 
+        default_spacing = np.array([4.0, 4.0, 4.0], dtype=np.float32)
         all_dices = 0.0
         all_nsds = 0.0
         item = 0
 
-        with open(json_prompt_path, "r", encoding="utf-8") as f:
-            prompts_dict = json.load(f)
+        try:
+            with open(json_prompt_path, "r", encoding="utf-8") as f:
+                prompts_dict = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"Failed to load validation prompt JSON: {json_prompt_path}") from e
 
         for filename in os.listdir(npz_dir):
             if not filename.endswith(".npz"):
@@ -558,13 +562,13 @@ if __name__ == "__main__":
 
             npz_path = os.path.join(npz_dir, filename)
             case_id = os.path.splitext(filename)[0]
-            with np.load(npz_path, "r", allow_pickle=True) as npz_data:
+            with np.load(npz_path, allow_pickle=True) as npz_data:
                 img_3D = npz_data["imgs"]
                 gt_3D = npz_data["gts"]
                 if "spacing" in npz_data:
                     spacing = npz_data["spacing"]
                 else:
-                    spacing = np.array([4.0, 4.0, 4.0], dtype=np.float32)
+                    spacing = default_spacing
 
             seg_3D = np.zeros_like(gt_3D, dtype=np.uint8)
 
@@ -598,6 +602,7 @@ if __name__ == "__main__":
                     slice_seg = np.zeros((H, W), dtype=np.uint8)
                     scale = 256.0 / max(H, W)
                     for box in boxes:
+                        # JSON stores [y_min, x_min, y_max, x_max]; reorder to [x_min, y_min, x_max, y_max] below.
                         y_min, x_min, y_max, x_max = box
                         box_256 = np.array(
                             [x_min * scale, y_min * scale, x_max * scale, y_max * scale],
@@ -906,20 +911,21 @@ if __name__ == "__main__":
     train_losses = []
     medsam_lite_model.eval()
     train_bbox_root = join(args.data_root, "bboxes")
-    dice_score1,nsd1=MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
-    print(f"Epoch {0}: Oracle Train Dice = {dice_score1:.4f}, Oracle Train NSD = {nsd1:.4f}")
-    wandb.log({"Oracle Train Dice": dice_score1,"Oracle Train NSD": nsd1,"Epoch":0})  # 记录到 wandb
+    initial_eval_epoch = 0
+    dice_score1, nsd1 = MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
+    print(f"Epoch {initial_eval_epoch}: Oracle Train Dice = {dice_score1:.4f}, Oracle Train NSD = {nsd1:.4f}")
+    wandb.log({"Oracle Train Dice": dice_score1, "Oracle Train NSD": nsd1, "Epoch": initial_eval_epoch})
     val_bbox_root = join(args.test_data_root, "bboxes")  # test_data_root是验证集npy根路径
-    dice_score,nsd2=MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
-    print(f"Epoch {0}: Oracle Val Dice = {dice_score:.4f}, Oracle Val NSD = {nsd2:.4f}")
-    wandb.log({"Oracle Val Dice": dice_score,"Oracle Val NSD": nsd2, "Epoch":0})  # 记录到 wandb
+    best_dice_score, nsd2 = MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
+    print(f"Epoch {initial_eval_epoch}: Oracle Val Dice = {best_dice_score:.4f}, Oracle Val NSD = {nsd2:.4f}")
+    wandb.log({"Oracle Val Dice": best_dice_score, "Oracle Val NSD": nsd2, "Epoch": initial_eval_epoch})
     if val_json_prompt_path is not None and os.path.isfile(val_json_prompt_path):
         pipeline_dice, pipeline_nsd = MedSAM_pipeline_infer_npz(
             test_pathfile, val_json_prompt_path, medsam_lite_model, device
         )
-        print(f"Epoch {0}: Pipeline Val Dice = {pipeline_dice:.4f}, Pipeline Val NSD = {pipeline_nsd:.4f}")
-        wandb.log({"Pipeline Val Dice": pipeline_dice, "Pipeline Val NSD": pipeline_nsd, "Epoch": 0})
-        dice_score = pipeline_dice
+        print(f"Epoch {initial_eval_epoch}: Pipeline Val Dice = {pipeline_dice:.4f}, Pipeline Val NSD = {pipeline_nsd:.4f}")
+        wandb.log({"Pipeline Val Dice": pipeline_dice, "Pipeline Val NSD": pipeline_nsd, "Epoch": initial_eval_epoch})
+        best_dice_score = pipeline_dice
     medsam_lite_model.train()
     iou=[]
     ce=[]
@@ -1014,12 +1020,12 @@ if __name__ == "__main__":
             val_loss = 0.0
             with torch.no_grad():
                 if train_pathfile!=None:
-                    dice_score1,nsd1=MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
+                    dice_score1, nsd1 = MedSAM_infer_npz(train_pathfile, bbox_root=train_bbox_root)
                     print(f"Epoch {epoch + 1}: Oracle Train Dice = {dice_score1:.4f}, Oracle Train NSD = {nsd1:.4f}")
-                    wandb.log({"Oracle Train Dice": dice_score1,"Oracle Train NSD": nsd1, "Epoch":epoch})  # 记录到 wandb
-                dice_score2, nsd2=MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
+                    wandb.log({"Oracle Train Dice": dice_score1, "Oracle Train NSD": nsd1, "Epoch": epoch})
+                dice_score2, nsd2 = MedSAM_infer_npz(test_pathfile, bbox_root=val_bbox_root)
                 print(f"Epoch {epoch + 1}: Oracle Val Dice = {dice_score2:.4f}, Oracle Val NSD = {nsd2:.4f}")
-                wandb.log({"Oracle Val Dice": dice_score2,"Oracle Val NSD": nsd2, "Epoch":epoch})  # 记录到 wandb
+                wandb.log({"Oracle Val Dice": dice_score2, "Oracle Val NSD": nsd2, "Epoch": epoch})
                 val_dice_for_best = dice_score2
                 if val_json_prompt_path is not None and os.path.isfile(val_json_prompt_path):
                     pipeline_dice, pipeline_nsd = MedSAM_pipeline_infer_npz(
@@ -1078,8 +1084,8 @@ if __name__ == "__main__":
             torch.save(checkpoint, join(work_dir, "medsam_lite_best_val.pth"))
         else:
             epochs_without_improvement += 1
-        if val_dice_for_best > dice_score:
-            dice_score = val_dice_for_best
+        if val_dice_for_best > best_dice_score:
+            best_dice_score = val_dice_for_best
             torch.save(checkpoint, join(work_dir, "medsam_lite_best_dice.pth"))
             
         wandb.log({
